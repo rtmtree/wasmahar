@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <atomic>
@@ -37,6 +38,33 @@ extern "C" void SetEmcRomPath(const char* path) {
     if (path && path[0] != '\0') {
         g_rom_filepath = path;
         g_rom_path_set = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direct touch input from JS. Emscripten's SDL2 port routes mouse/touch
+// events through multiple SDL_Windows (main + hidden dummies for shared
+// GL contexts), and the mouse-focus accounting drops motion events for
+// the render window. Calling the EmuWindow Touch API directly avoids all
+// of that indirection — JS passes canvas-local pixel coords.
+// ---------------------------------------------------------------------------
+extern "C" void EmcTouchDown(int x, int y) {
+    if (g_emu_window) {
+        g_emu_window->TouchPressed(static_cast<unsigned>(std::max(x, 0)),
+                                   static_cast<unsigned>(std::max(y, 0)));
+    }
+}
+
+extern "C" void EmcTouchMove(int x, int y) {
+    if (g_emu_window) {
+        g_emu_window->TouchMoved(static_cast<unsigned>(std::max(x, 0)),
+                                 static_cast<unsigned>(std::max(y, 0)));
+    }
+}
+
+extern "C" void EmcTouchUp() {
+    if (g_emu_window) {
+        g_emu_window->TouchReleased();
     }
 }
 
@@ -165,7 +193,25 @@ static void MainLoopIter() {
         return;
     }
 
-    const auto result = g_system->RunLoop();
+    // Run multiple CPU slices per rAF tick, bounded by a real-time budget.
+    // The ARM_DynCom interpreter is ~10× slower than the native Dynarmic JIT
+    // (Dynarmic can't emit code in WASM), so a single slice per rAF only runs
+    // the game at ~10-15 % speed. Burn up to 12 ms of wall-time per tick
+    // (out of a 16.6 ms frame budget) stacking back-to-back slices — this
+    // lifts the game to ~90 % of real-time speed when CPU-bound, without
+    // starving the browser event loop.
+    constexpr double kBudgetMs = 12.0;
+    const double start_ms = emscripten_get_now();
+    Core::System::ResultStatus result = Core::System::ResultStatus::Success;
+    do {
+        result = g_system->RunLoop();
+        if (result != Core::System::ResultStatus::Success) break;
+    } while (emscripten_get_now() - start_ms < kBudgetMs);
+
+    if (result != Core::System::ResultStatus::Success &&
+        result != Core::System::ResultStatus::ShutdownRequested) {
+        std::cerr << "[Azahar] RunLoop error: " << static_cast<int>(result) << std::endl;
+    }
 
     switch (result) {
     case Core::System::ResultStatus::ShutdownRequested:

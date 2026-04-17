@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -191,7 +192,20 @@ void EmuWindow_SDL2::PollEvents() {
 
     // SDL_PollEvent returns 0 when there are no more events in the event queue
     while (SDL_PollEvent(&event)) {
-        if (GetEventWindowId(event) != render_window_id) {
+        // Keyboard events in Emscripten's SDL port are not associated with a
+        // particular window (windowID=0), so skip the window-id filter for
+        // them; otherwise every key press is silently dropped.
+        // Emscripten's SDL port doesn't associate input events with a
+        // particular window (windowID=0), so only apply the window-id filter
+        // to window lifecycle events; otherwise every key/mouse/touch press
+        // would be silently dropped.
+        const bool is_input_event =
+            event.type == SDL_KEYDOWN || event.type == SDL_KEYUP ||
+            event.type == SDL_MOUSEMOTION || event.type == SDL_MOUSEBUTTONDOWN ||
+            event.type == SDL_MOUSEBUTTONUP || event.type == SDL_MOUSEWHEEL ||
+            event.type == SDL_FINGERDOWN || event.type == SDL_FINGERMOTION ||
+            event.type == SDL_FINGERUP;
+        if (!is_input_event && GetEventWindowId(event) != render_window_id) {
             other_window_events.push_back(event);
             continue;
         }

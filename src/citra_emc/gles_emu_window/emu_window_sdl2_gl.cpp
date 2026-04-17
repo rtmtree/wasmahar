@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
 #include <glad/glad.h>
@@ -130,6 +133,19 @@ EmuWindow_SDL2_GL::EmuWindow_SDL2_GL(Core::System& system_, bool fullscreen, boo
         LOG_CRITICAL(Frontend, "Failed to initialize GL functions: {}", SDL_GetError());
         throw std::runtime_error("Failed to initialize GL functions: " + std::string(SDL_GetError()));
     }
+
+#ifdef __EMSCRIPTEN__
+    // Emscripten's SDL2 port collapses the HTML canvas down to a tiny
+    // drawing buffer when we create extra hidden windows (for the shared
+    // GL context). Force the canvas back to the 3DS combined-screen size
+    // so the framebuffer layout matches the WebGL drawing buffer.
+    EM_ASM({
+        if (Module.canvas) {
+            Module.canvas.width = $0;
+            Module.canvas.height = $1;
+        }
+    }, Core::kScreenTopWidth, Core::kScreenTopHeight + Core::kScreenBottomHeight);
+#endif
 
     OnResize();
     OnMinimalClientAreaChangeRequest(GetActiveConfig().min_client_area_size);

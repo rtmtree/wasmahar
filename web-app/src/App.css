@@ -2,7 +2,7 @@
 .app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
   max-width: 100vw;
   overflow: hidden;
 }
@@ -131,10 +131,13 @@
 .app-main {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 16px;
   padding: 20px;
   position: relative;
+  overflow-y: auto;
 }
 
 /* ========== File Drop Zone ========== */
@@ -218,6 +221,10 @@
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
   line-height: 0;
   display: none;
+  /* Let the container shrink to wrap the canvas so its height isn't
+     collapsed by the flex column layout. */
+  flex: 0 0 auto;
+  width: fit-content;
 }
 
 .emulator-canvas-container.active {
@@ -226,6 +233,11 @@
 
 .emulator-canvas-container canvas {
   display: block;
+  /* 400×480 native 3DS combined-screen framebuffer. Cap by both viewport width
+     and height so the canvas never pushes the virtual controller off-screen. */
+  height: min(60vh, 600px);
+  aspect-ratio: 400 / 480;
+  max-width: 90vw;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
 }
@@ -268,6 +280,142 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ========== Virtual Controller ========== */
+.virtual-controller {
+  --pad-size: 128px;     /* side of dpad / face-pad square */
+  --pad-btn: 42px;       /* button diameter */
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  user-select: none;
+  touch-action: none;
+  width: 100%;
+  padding: 0 12px;
+  box-sizing: border-box;
+}
+@media (max-width: 420px) {
+  .virtual-controller { --pad-size: 108px; --pad-btn: 36px; }
+}
+
+.pad-shoulders {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: min(480px, 100%);
+}
+
+.pad-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: min(480px, 100%);
+}
+
+.pad-btn {
+  background: var(--bg-elevated);
+  color: var(--text-h);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.05s ease, background 0.1s ease, border-color 0.1s ease;
+  cursor: pointer;
+}
+.pad-btn:active,
+.pad-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent);
+}
+.pad-btn:active { transform: scale(0.94); }
+
+.pad-shoulder {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  border-radius: 14px;
+}
+
+.pad-dpad,
+.pad-face {
+  position: relative;
+  width: var(--pad-size);
+  height: var(--pad-size);
+  flex: 0 0 auto;
+}
+.pad-dpad > .pad-btn,
+.pad-face-btn {
+  position: absolute;
+  width: var(--pad-btn);
+  height: var(--pad-btn);
+  font-size: 16px;
+}
+.pad-dpad > .pad-btn { border-radius: 8px; }
+.pad-face-btn { border-radius: 50%; }
+
+.pad-dpad-up    { top: 0;                  left: calc(50% - var(--pad-btn) / 2); }
+.pad-dpad-down  { bottom: 0;               left: calc(50% - var(--pad-btn) / 2); }
+.pad-dpad-left  { left: 0;                 top: calc(50% - var(--pad-btn) / 2); }
+.pad-dpad-right { right: 0;                top: calc(50% - var(--pad-btn) / 2); }
+
+.pad-face-x     { top: 0;                  left: calc(50% - var(--pad-btn) / 2); }
+.pad-face-b     { bottom: 0;               left: calc(50% - var(--pad-btn) / 2); }
+.pad-face-y     { left: 0;                 top: calc(50% - var(--pad-btn) / 2); }
+.pad-face-a     { right: 0;                top: calc(50% - var(--pad-btn) / 2); }
+
+.pad-system {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.pad-system-btn {
+  width: 72px;
+  height: 24px;
+  border-radius: 12px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+.pad-cpad-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 4px;
+}
+.pad-cpad-label {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  opacity: 0.6;
+}
+.pad-cpad {
+  position: relative;
+  width: var(--pad-size);
+  height: calc(var(--pad-size) * 0.8);
+}
+.pad-cpad > .pad-btn {
+  position: absolute;
+  width: var(--pad-btn);
+  height: var(--pad-btn);
+  border-radius: 50%;
+  font-size: 18px;
+  background: rgba(99, 102, 241, 0.08);
+}
+.pad-cpad-up    { top: 0;    left: calc(50% - var(--pad-btn) / 2); }
+.pad-cpad-down  { bottom: 0; left: calc(50% - var(--pad-btn) / 2); }
+.pad-cpad-left  { left: 0;   top: calc(50% - var(--pad-btn) / 2); }
+.pad-cpad-right { right: 0;  top: calc(50% - var(--pad-btn) / 2); }
 
 /* ========== Footer ========== */
 .app-footer {

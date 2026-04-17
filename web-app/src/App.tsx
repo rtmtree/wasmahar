@@ -3,6 +3,7 @@ import { useEmulator } from './hooks/useEmulator';
 import { FileDrop } from './components/FileDrop';
 import { Controls } from './components/Controls';
 import { EmulatorCanvas } from './components/EmulatorCanvas';
+import { VirtualController } from './components/VirtualController';
 import type { EmulatorStatus } from './hooks/types';
 import './App.css';
 
@@ -94,6 +95,8 @@ function App() {
           canvasRef={canvasRef}
           containerRef={containerRef}
         />
+
+        {status !== 'idle' && status !== 'error' && <VirtualController />}
       </main>
 
       <footer className="app-footer">

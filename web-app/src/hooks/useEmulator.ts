@@ -95,6 +95,18 @@ export function useEmulator(): UseEmulatorReturn {
         throw new Error('Canvas element not ready');
       }
 
+      // The Azahar WASM is built with pthreads, which requires SharedArrayBuffer
+      // and a cross-origin-isolated context. Fail fast with a clear message
+      // rather than hanging forever on "Loading emulator…" in browsers that
+      // don't expose it (e.g. embedded Electron previews with SAB disabled).
+      if (typeof SharedArrayBuffer === 'undefined' || !self.crossOriginIsolated) {
+        throw new Error(
+          'This browser does not support SharedArrayBuffer in a cross-origin-' +
+          'isolated context, which the threaded WASM emulator requires. ' +
+          'Open http://localhost:5180/ in regular Chrome/Firefox to run the ROM.',
+        );
+      }
+
       // Read ROM file into a Uint8Array
       const romData = new Uint8Array(await file.arrayBuffer());
 
@@ -210,6 +222,73 @@ export function useEmulator(): UseEmulatorReturn {
       stopFpsCounter();
     };
   }, [stopFpsCounter]);
+
+  // Wire canvas pointer events → emulator touch input via direct ccall
+  // (bypasses SDL's multi-window mouse-focus routing in Emscripten).
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const touchState = { active: false, pointerId: -1 };
+
+    const toCanvasPixels = (ev: PointerEvent) => {
+      const r = canvas.getBoundingClientRect();
+      // Translate CSS pixels to the canvas's drawing-buffer pixel space.
+      const sx = canvas.width / r.width;
+      const sy = canvas.height / r.height;
+      return {
+        x: Math.round((ev.clientX - r.left) * sx),
+        y: Math.round((ev.clientY - r.top) * sy),
+      };
+    };
+
+    const callTouch = (name: string, args?: [number, number]) => {
+      const mod = moduleRef.current;
+      if (!mod) return;
+      try {
+        if (args) {
+          mod.ccall(name, null, ['number', 'number'], args);
+        } else {
+          mod.ccall(name, null, [], []);
+        }
+      } catch {
+        // ignore — likely called before ccall is ready
+      }
+    };
+
+    const onDown = (ev: PointerEvent) => {
+      if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+      touchState.active = true;
+      touchState.pointerId = ev.pointerId;
+      canvas.setPointerCapture?.(ev.pointerId);
+      const { x, y } = toCanvasPixels(ev);
+      callTouch('EmcTouchDown', [x, y]);
+      ev.preventDefault();
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!touchState.active || ev.pointerId !== touchState.pointerId) return;
+      const { x, y } = toCanvasPixels(ev);
+      callTouch('EmcTouchMove', [x, y]);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== touchState.pointerId) return;
+      touchState.active = false;
+      try { canvas.releasePointerCapture?.(ev.pointerId); } catch { /* empty */ }
+      callTouch('EmcTouchUp');
+    };
+
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointermove', onMove);
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointercancel', onUp);
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointermove', onMove);
+      canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointercancel', onUp);
+    };
+  }, []);
 
   return {
     status,

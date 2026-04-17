@@ -15,7 +15,7 @@ export function EmulatorCanvas({ status, canvasRef, containerRef }: EmulatorCanv
     <div ref={containerRef} className={`emulator-canvas-container ${isActive ? 'active' : ''}`}>
       <canvas
         ref={canvasRef}
-        id="emulator-canvas"
+        id="canvas"
         width={400}
         height={480}
       />
