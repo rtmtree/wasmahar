@@ -1,0 +1,10 @@
+This directory is where the compiled WASM output is placed.
+
+Run `./build_wasm.sh all` from the project root to build and copy files here.
+
+Expected files after build:
+- azahar.js        - Emscripten-generated JavaScript loader
+- azahar.wasm      - Compiled WebAssembly binary
+- azahar.html      - Emscripten-generated HTML (reference only)
+- *.data           - Preloaded filesystem data (if any)
+- *.worker.js      - Web Worker for threading

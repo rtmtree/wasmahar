@@ -202,7 +202,9 @@ static bool AttemptLLE(const ServiceModuleInfo& service_module, u64 loading_titl
         Common::Hacks::HackType::ONLINE_LLE_REQUIRED, loading_titleid,
         Settings::values.enable_required_online_lle_modules.GetValue());
 
-    if (!Settings::values.lle_modules.at(service_module.name) &&
+    const auto lle_it = Settings::values.lle_modules.find(service_module.name);
+    const bool lle_enabled = (lle_it != Settings::values.lle_modules.end()) && lle_it->second;
+    if (!lle_enabled &&
         (!enable_recommended_lle_modules || !service_module.is_online_recommended))
         return false;
     std::unique_ptr<Loader::AppLoader> loader =

@@ -47,7 +47,7 @@ if (APPLE)
 endif()
 
 if (EMSCRIPTEN)
-    set(CMAKE_EXECUTABLE_SUFFIX ".html")
+    set(CMAKE_EXECUTABLE_SUFFIX ".js")
 endif()
 
 if (CMAKE_BUILD_TYPE STREQUAL Debug)
@@ -213,7 +213,11 @@ if (EMSCRIPTEN)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g --use-port=sdl2 -pthread -fexperimental-library -fwasm-exceptions")
     # experimental-library is for jthread
     add_link_options(-lopenal -sMAX_WEBGL_VERSION=2 --use-port=sdl2) # OpenAL, OpenGL, SDL2 ports
-    add_link_options(-pthread -sPTHREAD_POOL_SIZE=15 -fexperimental-library -fwasm-exceptions -sTOTAL_MEMORY=200MB -sUSE_WEBGL2=1 --preload-file ../../rom.3ds@rom.3ds) # stuff for threads, debugging, and others
+    add_link_options(-pthread -sPTHREAD_POOL_SIZE=15 -fexperimental-library -fwasm-exceptions -sTOTAL_MEMORY=200MB -sALLOW_MEMORY_GROWTH=1 -sUSE_WEBGL2=1 -sEXPORT_NAME=createAzaharModule -sMODULARIZE=1 -sINVOKE_RUN=0) # stuff for threads, debugging, and others
+    # Export C functions callable from JavaScript and expose runtime methods
+    set(EMC_EXPORTED_FUNCTIONS "_main,_SetEmcRomPath" CACHE STRING "" FORCE)
+    set(EMC_EXPORTED_RUNTIME_METHODS "callMain,cwrap,ccall,FS" CACHE STRING "" FORCE)
+    # ROM files are loaded at runtime from the web UI, not preloaded at build time.
 endif()
 
 # Sanity check : Check that all submodules are present

@@ -4,7 +4,7 @@
 
 #include <iostream>
 #include <algorithm>
-#include <cstdlib>
+#include <stdexcept>
 #include <string>
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -23,25 +23,33 @@ public:
     SDLGLContext() {
         window = SDL_CreateWindow(NULL, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 0, 0,
                                   SDL_WINDOW_HIDDEN | SDL_WINDOW_OPENGL);
-        context = SDL_GL_CreateContext(window);
+        context = window ? SDL_GL_CreateContext(window) : nullptr;
     }
 
     ~SDLGLContext() override {
-        SDL_GL_DeleteContext(context);
-        SDL_DestroyWindow(window);
+#ifdef __EMSCRIPTEN__
+        // Skip SDL cleanup in Emscripten — browser handles it.
+        context = nullptr;
+        window = nullptr;
+#else
+        try {
+            if (context) SDL_GL_DeleteContext(context);
+            if (window) SDL_DestroyWindow(window);
+        } catch (...) {}
+#endif
     }
 
     void MakeCurrent() override {
-        SDL_GL_MakeCurrent(window, context);
+        if (window && context) SDL_GL_MakeCurrent(window, context);
     }
 
     void DoneCurrent() override {
-        SDL_GL_MakeCurrent(window, nullptr);
+        if (window) SDL_GL_MakeCurrent(window, nullptr);
     }
 
 private:
-    SDL_Window* window;
-    SDL_GLContext context;
+    SDL_Window* window = nullptr;
+    SDL_GLContext context = nullptr;
 };
 
 static SDL_Window* CreateGLWindow(const std::string& window_title, bool gles) {
@@ -81,15 +89,11 @@ EmuWindow_SDL2_GL::EmuWindow_SDL2_GL(Core::System& system_, bool fullscreen, boo
     std::string window_title = fmt::format("Azahar {} | {}-{}", Common::g_build_fullname,
                                            Common::g_scm_branch, Common::g_scm_desc);
 
-    // First, try to create a context with the requested type.
+    // First, try to create a context with the requested type (GLES).
     render_window = CreateGLWindow(window_title, true);
     if (render_window == nullptr) {
-        // On failure, fall back to context with flipped type. (not for emscripten)
-        // render_window = CreateGLWindow(window_title, !Settings::values.use_gles.GetValue());
-        // if (render_window == nullptr) {
         LOG_CRITICAL(Frontend, "Failed to create SDL2 window: {}", SDL_GetError());
-        // exit(1);
-        // }
+        throw std::runtime_error("Failed to create SDL2 window: " + std::string(SDL_GetError()));
     }
 
     strict_context_required = std::strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0;
@@ -102,16 +106,17 @@ EmuWindow_SDL2_GL::EmuWindow_SDL2_GL(Core::System& system_, bool fullscreen, boo
     }
 
     window_context = SDL_GL_CreateContext(render_window);
+    if (window_context == nullptr) {
+        LOG_CRITICAL(Frontend, "Failed to create SDL2 GL context: {}", SDL_GetError());
+        throw std::runtime_error("Failed to create SDL2 GL context: " + std::string(SDL_GetError()));
+    }
+
     core_context = CreateSharedContext();
     last_saved_context = nullptr;
 
-    if (window_context == nullptr) {
-        LOG_CRITICAL(Frontend, "Failed to create SDL2 GL context: {}", SDL_GetError());
-        exit(1);
-    }
     if (core_context == nullptr) {
         LOG_CRITICAL(Frontend, "Failed to create shared SDL2 GL context: {}", SDL_GetError());
-        exit(1);
+        throw std::runtime_error("Failed to create shared GL context: " + std::string(SDL_GetError()));
     }
 
     render_window_id = SDL_GetWindowID(render_window);
@@ -123,7 +128,7 @@ EmuWindow_SDL2_GL::EmuWindow_SDL2_GL(Core::System& system_, bool fullscreen, boo
 
     if (!gl_load_func(static_cast<GLADloadproc>(SDL_GL_GetProcAddress))) {
         LOG_CRITICAL(Frontend, "Failed to initialize GL functions: {}", SDL_GetError());
-        exit(1);
+        throw std::runtime_error("Failed to initialize GL functions: " + std::string(SDL_GetError()));
     }
 
     OnResize();
@@ -132,9 +137,27 @@ EmuWindow_SDL2_GL::EmuWindow_SDL2_GL(Core::System& system_, bool fullscreen, boo
 }
 
 EmuWindow_SDL2_GL::~EmuWindow_SDL2_GL() {
-    core_context.reset();
-    SDL_DestroyWindow(render_window);
-    SDL_GL_DeleteContext(window_context);
+    std::cout << "[Azahar] ~EmuWindow_SDL2_GL: starting cleanup" << std::endl;
+
+    // core_context (shared SDLGLContext) cleanup
+    try {
+        core_context.reset();
+        std::cout << "[Azahar] ~EmuWindow_SDL2_GL: core_context reset done" << std::endl;
+    } catch (...) {
+        std::cout << "[Azahar] ~EmuWindow_SDL2_GL: core_context reset threw" << std::endl;
+    }
+
+    // NOTE: SDL_GL_DeleteContext can abort() in Emscripten if the GL context
+    // is in a bad state or SDL has been partially shut down. Skip it —
+    // the browser will clean up all resources when the page unloads.
+    std::cout << "[Azahar] ~EmuWindow_SDL2_GL: skipping GL context delete (Emscripten)" << std::endl;
+    window_context = nullptr;
+
+    // Same for render_window — skip SDL_DestroyWindow to avoid abort in Emscripten.
+    std::cout << "[Azahar] ~EmuWindow_SDL2_GL: skipping window destroy (Emscripten)" << std::endl;
+    render_window = nullptr;
+
+    std::cout << "[Azahar] ~EmuWindow_SDL2_GL: cleanup done" << std::endl;
 }
 
 std::unique_ptr<Frontend::GraphicsContext> EmuWindow_SDL2_GL::CreateSharedContext() const {
@@ -154,15 +177,25 @@ void EmuWindow_SDL2_GL::SaveContext() {
 }
 
 void EmuWindow_SDL2_GL::RestoreContext() {
-    SDL_GL_MakeCurrent(render_window, last_saved_context);
+    if (render_window) SDL_GL_MakeCurrent(render_window, last_saved_context);
 }
 
 void EmuWindow_SDL2_GL::Present() {
+    if (!render_window || !window_context) return;
     SDL_GL_MakeCurrent(render_window, window_context);
-    SDL_GL_SetSwapInterval(1);
+    SDL_GL_SetSwapInterval(0);
+
+#ifdef __EMSCRIPTEN__
+    // Single-frame present for Emscripten — the main loop calls this each iteration.
+    // The renderer must draw while the window GL context is current, not the core
+    // (shared) context left current by Acquire().
+    system.GPU().Renderer().TryPresent(0, is_secondary);
+    SDL_GL_SwapWindow(render_window);
+#else
     while (IsOpen()) {
         system.GPU().Renderer().TryPresent(100, is_secondary);
         SDL_GL_SwapWindow(render_window);
     }
     SDL_GL_MakeCurrent(render_window, nullptr);
+#endif
 }

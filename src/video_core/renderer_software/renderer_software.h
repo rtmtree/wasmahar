@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <glad/glad.h>
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_software/sw_rasterizer.h"
 
@@ -34,17 +35,29 @@ public:
     }
 
     void SwapBuffers() override;
-    void TryPresent(int timeout_ms, bool is_secondary) override {}
+    void TryPresent(int timeout_ms, bool is_secondary) override;
+    void PrepareVideoDumping() override {}
+    void CleanupVideoDumping() override {}
 
 private:
     void PrepareRenderTarget();
     void LoadFBToScreenInfo(int i);
+    void InitOpenGLObjects();
+    void DrawScreen(const ScreenInfo& info, float x, float y, float w, float h);
 
 private:
     Memory::MemorySystem& memory;
     Pica::PicaCore& pica;
     RasterizerSoftware rasterizer;
     std::array<ScreenInfo, 3> screen_infos{};
+
+    // OpenGL objects for presenting
+    GLuint gl_texture = 0;
+    GLuint gl_program = 0;
+    GLuint gl_vao = 0;
+    GLuint gl_vbo = 0;
+    GLint gl_tex_uniform = -1;
+    bool gl_initialized = false;
 };
 
 } // namespace SwRenderer

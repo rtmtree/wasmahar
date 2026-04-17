@@ -523,10 +523,14 @@ System::ResultStatus System::Init(Frontend::EmuWindow& emu_window,
 
     custom_tex_manager = std::make_unique<VideoCore::CustomTexManager>(*this);
 
+    LOG_INFO(Core, "Creating GPU...");
+
     auto gsp = service_manager->GetService<Service::GSP::GSP_GPU>("gsp::Gpu");
     gpu = std::make_unique<VideoCore::GPU>(*this, emu_window, secondary_window);
     gpu->SetInterruptHandler(
         [gsp](Service::GSP::InterruptId interrupt_id) { gsp->SignalInterrupt(interrupt_id); });
+
+    LOG_INFO(Core, "GPU created successfully");
 
     auto plg_ldr = Service::PLGLDR::GetService(*this);
     if (plg_ldr) {

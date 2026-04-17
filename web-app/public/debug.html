@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head><title>Azahar Debug</title></head>
+<body style="margin:0;background:#111;color:#eee;font-family:monospace;">
+<pre id="log" style="width:100%;height:100vh;overflow:auto;padding:16px;font-size:18px;line-height:1.8;"></pre>
+<script>
+const logEl = document.getElementById('log');
+let allText = '';
+function log(msg) {
+  allText += msg + '\n';
+  logEl.textContent = allText;
+  logEl.scrollTop = logEl.scrollHeight;
+  clearTimeout(window.__logTimer);
+  window.__logTimer = setTimeout(() => {
+    fetch('http://localhost:9999/logs', { method: 'POST', body: allText }).catch(() => {});
+  }, 1000);
+}
+
+// Intercept console
+const origLog = console.log;
+const origErr = console.error;
+console.log = (...a) => { origLog(...a); log(a.join(' ')); };
+console.error = (...a) => { origErr(...a); log('ERR: ' + a.join(' ')); };
+
+window.onerror = (msg, src, line, col, err) => {
+  log('UNCAUGHT: ' + msg + ' at ' + src + ':' + line);
+  if (err && err.stack) log('STACK: ' + err.stack);
+};
+window.onunhandledrejection = (e) => {
+  log('UNHANDLED PROMISE: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+};
+
+// Expose logs for reading
+window.__logs = allText;
+window.__getLogs = () => allText;
+
+// Test immediate POST
+fetch('http://localhost:9999/logs', { method: 'POST', body: 'PAGE LOADED' }).catch(e => {
+  log('POST FAILED: ' + e.message);
+});
+
+async function run() {
+  try {
+    log('=== Azahar WASM Debug ===');
+    log('Fetching ROM from /ab.3ds...');
+
+    const romResp = await fetch('/ab.3ds');
+    if (!romResp.ok) { log('ROM fetch failed: ' + romResp.status); return; }
+    const romData = new Uint8Array(await romResp.arrayBuffer());
+    log('ROM fetched: ' + romData.length + ' bytes');
+
+    log('Loading WASM module...');
+    const script = document.createElement('script');
+    script.src = '/wasm/azahar.js';
+    await new Promise((resolve, reject) => {
+      script.onload = resolve;
+      script.onerror = reject;
+    });
+    document.head.appendChild(script);
+    log('WASM script loaded');
+
+    const factory = window.createAzaharModule;
+    if (!factory) { log('ERROR: createAzaharModule not found'); return; }
+
+    const canvas = document.createElement('canvas');
+    canvas.id = 'canvas';
+    canvas.width = 400;
+    canvas.height = 480;
+    canvas.style.cssText = 'position:fixed;top:0;left:0;width:400px;height:480px;z-index:0;';
+    document.body.insertBefore(canvas, logEl);
+    logEl.style.zIndex = '1';
+    logEl.style.position = 'relative';
+
+    log('Initializing WASM module...');
+    const mod = await factory({
+      canvas: canvas,
+      print: (t) => log('[OUT] ' + t),
+      printErr: (t) => log('[ERR] ' + t),
+      onAbort: (w) => { log('!!! ABORTED: ' + w); },
+      locateFile: (f) => '/wasm/' + f,
+    });
+
+    log('WASM module initialized');
+    log('Writing ROM to virtual FS...');
+    mod.FS.writeFile('/rom.3ds', romData);
+    log('ROM written to /rom.3ds');
+
+    log('Setting ROM path...');
+    mod.ccall('SetEmcRomPath', null, ['string'], ['/rom.3ds']);
+    log('ROM path set');
+
+    log('Calling main()...');
+    mod.callMain([]);
+    log('main() returned');
+
+  } catch(e) {
+    log('CAUGHT: ' + e.message);
+    if (e.stack) log('STACK: ' + e.stack);
+  }
+}
+
+run();
+</script>
+</body>
+</html>

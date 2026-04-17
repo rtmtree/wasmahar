@@ -1,9 +1,13 @@
 #include <iostream>
+#include <string>
+#include <atomic>
+#include <stdexcept>
+
 #include "common/detached_tasks.h"
 #include "common/settings.h"
+#include "common/file_util.h"
 
 #include "core/core.h"
-
 #include "core/frontend/applets/default_applets.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "input_common/main.h"
@@ -13,135 +17,208 @@
 
 #include "citra_emc/gles_emu_window/emu_window_sdl2.h"
 #include "citra_emc/gles_emu_window/emu_window_sdl2_gl.h"
+#include "citra_emc/citra_emc.h"
 
-void LaunchEmcFrontend(int argc, char** argv) {
-    std::cout << "Welcome to Azahar" << std::endl;
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
-    Common::DetachedTasks detached_tasks;
+// ---------------------------------------------------------------------------
+// Global state shared with JavaScript
+// ---------------------------------------------------------------------------
+static std::string g_rom_filepath;
+static std::atomic_bool g_rom_path_set{false};
+static std::atomic_bool g_emulator_running{false};
 
-    Common::Log::Initialize();
-    Common::Log::Start();
+static Core::System* g_system = nullptr;
+static EmuWindow_SDL2* g_emu_window = nullptr;
 
-    std::cout << "Logging inititialized" << std::endl;
+extern "C" void SetEmcRomPath(const char* path) {
+    if (path && path[0] != '\0') {
+        g_rom_filepath = path;
+        g_rom_path_set = true;
+    }
+}
 
-    std::string filepath = "rom.3ds";
+// ---------------------------------------------------------------------------
+// Error-safe initialization — returns false instead of calling exit()
+// ---------------------------------------------------------------------------
+static bool InitEmulator() {
+    try {
+        std::cout << "[Azahar] Initializing emulator..." << std::endl;
 
-    auto& system = Core::System::GetInstance();
+        Common::DetachedTasks detached_tasks;
 
-    Frontend::RegisterDefaultApplets(system);
+        Common::Log::Initialize();
+        Common::Log::Start();
 
+        std::cout << "[Azahar] Logging initialized" << std::endl;
 
-    std::cout << "Created system and registered default applets" << std::endl;
+        // Wait for JS to provide a ROM path
+        if (!g_rom_path_set) {
+            std::cout << "[Azahar] No ROM path set. Call SetEmcRomPath() first." << std::endl;
+            return false;
+        }
 
-    EmuWindow_SDL2::InitializeSDL2();
+        std::cout << "[Azahar] ROM path: " << g_rom_filepath << std::endl;
 
-    std::cout << "SDL Initialized" << std::endl;
+        // Ensure required user data directories exist
+        const auto user_path = FileUtil::GetUserPath(FileUtil::UserPath::UserDir);
+        std::cout << "[Azahar] User data dir: " << user_path << std::endl;
+        FileUtil::CreateFullPath(user_path + "sysdata/");
+        FileUtil::CreateFullPath(user_path + "nand/data/00000000000000000000000000000000/extdata/");
+        FileUtil::CreateFullPath(user_path + "sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/extdata/");
+        FileUtil::CreateFullPath(user_path + "config/");
+        FileUtil::CreateFullPath(user_path + "cache/");
+        std::cout << "[Azahar] User directories created" << std::endl;
 
-    const auto create_emu_window = [&](bool fullscreen,
-                                       bool is_secondary) -> std::unique_ptr<EmuWindow_SDL2> {
-        return std::make_unique<EmuWindow_SDL2_GL>(system, fullscreen, is_secondary);
-    };
+        auto& system = Core::System::GetInstance();
+        g_system = &system;
 
-    const auto emu_window{create_emu_window(true, false)};
+        Frontend::RegisterDefaultApplets(system);
 
-    std::cout << "Created window" << std::endl;
+        std::cout << "[Azahar] Created system and registered default applets" << std::endl;
 
-    const auto scope = emu_window->Acquire();
+        EmuWindow_SDL2::InitializeSDL2();
 
-    const Core::System::ResultStatus load_result{system.Load(*emu_window, filepath, nullptr)};
+        std::cout << "[Azahar] SDL Initialized" << std::endl;
+        std::cout << "[Azahar] Creating emu window..." << std::endl;
 
-    std::cout << "Loaded ROM" << std::endl;
+        auto emu_window_ptr = std::make_unique<EmuWindow_SDL2_GL>(system, true, false);
+        g_emu_window = emu_window_ptr.get();
 
-    switch (load_result) {
-    case Core::System::ResultStatus::ErrorGetLoader:
-        std::cout << "Failed to obtain loader for " << filepath << std::endl;
+        std::cout << "[Azahar] Created window" << std::endl;
 
-        LOG_CRITICAL(Frontend, "Failed to obtain loader for {}!", filepath);
-        exit(-1);
-    case Core::System::ResultStatus::ErrorLoader:
-        std::cout << "Failed to load ROM!" << std::endl;
+        const auto scope = emu_window_ptr->Acquire();
 
-        LOG_CRITICAL(Frontend, "Failed to load ROM!");
-        exit(-1);
-    case Core::System::ResultStatus::ErrorLoader_ErrorEncrypted:
-        std::cout << "The application that you are trying to load must be decrypted before "
-                     "being used with Azahar. \n\n For more information on dumping and "
-                     "decrypting applications, please refer to: "
-                     "https://web.archive.org/web/20240304210021/https://citra-emu.org/"
-                     "wiki/dumping-game-cartridges/"
-                  << std::endl;
+        std::cout << "[Azahar] Acquired window scope, loading ROM..." << std::endl;
 
-        LOG_CRITICAL(Frontend,
-                     "The application that you are trying to load must be decrypted before "
-                     "being used with Azahar. \n\n For more information on dumping and "
-                     "decrypting applications, please refer to: "
-                     "https://web.archive.org/web/20240304210021/https://citra-emu.org/"
-                     "wiki/dumping-game-cartridges/");
-        exit(-1);
-    case Core::System::ResultStatus::ErrorLoader_ErrorInvalidFormat:
-        std::cout << "Error while loading ROM: The ROM format is not supported." << std::endl;
+#ifdef __EMSCRIPTEN__
+        // Force software renderer — WebGL2 lacks GL_TEXTURE_BUFFER needed by OpenGL renderer
+        Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::Software);
+        std::cout << "[Azahar] Using software renderer (WebGL2)" << std::endl;
+#endif
 
-        LOG_CRITICAL(Frontend, "Error while loading ROM: The ROM format is not supported.");
-        exit(-1);
-    case Core::System::ResultStatus::ErrorNotInitialized:
-        std::cout << "CPUCore not initialized" << std::endl;
+        const Core::System::ResultStatus load_result{system.Load(*emu_window_ptr, g_rom_filepath, nullptr)};
 
-        LOG_CRITICAL(Frontend, "CPUCore not initialized");
-        exit(-1);
-    case Core::System::ResultStatus::ErrorSystemMode:
-        std::cout << "Failed to determine system mode!" << std::endl;
+        std::cout << "[Azahar] Load result: " << static_cast<int>(load_result) << std::endl;
 
-        LOG_CRITICAL(Frontend, "Failed to determine system mode!");
-        exit(-1);
+        switch (load_result) {
+        case Core::System::ResultStatus::Success:
+            std::cout << "[Azahar] ROM loaded successfully!" << std::endl;
+            break;
+        case Core::System::ResultStatus::ErrorGetLoader:
+            std::cerr << "[Azahar] Failed to obtain loader for " << g_rom_filepath << std::endl;
+            return false;
+        case Core::System::ResultStatus::ErrorLoader:
+            std::cerr << "[Azahar] Failed to load ROM!" << std::endl;
+            return false;
+        case Core::System::ResultStatus::ErrorLoader_ErrorEncrypted:
+            std::cerr << "[Azahar] ROM is encrypted. Must be decrypted first." << std::endl;
+            return false;
+        case Core::System::ResultStatus::ErrorLoader_ErrorInvalidFormat:
+            std::cerr << "[Azahar] ROM format not supported." << std::endl;
+            return false;
+        case Core::System::ResultStatus::ErrorNotInitialized:
+            std::cerr << "[Azahar] CPU core not initialized." << std::endl;
+            return false;
+        case Core::System::ResultStatus::ErrorSystemMode:
+            std::cerr << "[Azahar] Failed to determine system mode." << std::endl;
+            return false;
+        default:
+            std::cerr << "[Azahar] Error loading ROM: " << system.GetStatusDetails() << std::endl;
+            return false;
+        }
+
+        // Load disk resources
+        std::atomic_bool stop_run{false};
+        system.GPU().Renderer().Rasterizer()->LoadDefaultDiskResources(
+            stop_run, [](VideoCore::LoadCallbackStage stage, std::size_t value, std::size_t total) {
+                std::cout << "[Azahar] Loading resources: stage=" << static_cast<u32>(stage)
+                          << " progress=" << value << "/" << total << std::endl;
+            });
+
+        std::cout << "[Azahar] Disk resources loaded. Starting emulation loop." << std::endl;
+
+        // Keep the window and scope alive — they must outlive the main loop.
+        // In the emscripten path, emscripten_set_main_loop does not return,
+        // so we intentionally leak these — they get cleaned up on page unload.
+        emu_window_ptr.release();
+        new decltype(scope)(std::move(scope));
+
+        g_emulator_running = true;
+        return true;
+    } catch (const std::exception& e) {
+        std::cout << "[Azahar] Exception during init: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cout << "[Azahar] Unknown exception during init" << std::endl;
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single iteration of the emulation main loop
+// ---------------------------------------------------------------------------
+static void MainLoopIter() {
+    if (!g_emulator_running || !g_system || !g_emu_window) {
+        return;
+    }
+
+    const auto result = g_system->RunLoop();
+
+    switch (result) {
+    case Core::System::ResultStatus::ShutdownRequested:
+        std::cout << "[Azahar] Shutdown requested." << std::endl;
+        g_emu_window->RequestClose();
+        g_emulator_running = false;
+#ifdef __EMSCRIPTEN__
+        emscripten_cancel_main_loop();
+#endif
+        break;
     case Core::System::ResultStatus::Success:
-        std::cout << "Loaded Successfully!" << std::endl;
-
-        break; // Expected case
+        break;
     default:
-        std::cout << "Error while loading ROM: " << system.GetStatusDetails() << std::endl;
-
-        LOG_ERROR(Frontend, "Error while loading ROM: {}", system.GetStatusDetails());
+        std::cerr << "[Azahar] Error in run loop: " << static_cast<int>(result) << std::endl;
         break;
     }
 
-    std::thread main_render_thread([&emu_window] { emu_window->Present(); });
-    std::atomic_bool stop_run;
+#ifdef __EMSCRIPTEN__
+    // Present the frame to the canvas after each emulation step.
+    // In Emscripten, there is no separate Present thread — we do it here.
+    // Present() will make the window GL context current, call TryPresent,
+    // then SDL_GL_SwapWindow.
+    if (g_system && g_emu_window) {
+        g_emu_window->Present();
+    }
+#endif
+}
 
-    system.GPU().Renderer().Rasterizer()->LoadDefaultDiskResources(
-        stop_run, [](VideoCore::LoadCallbackStage stage, std::size_t value, std::size_t total) {
-            LOG_DEBUG(Frontend, "Loading stage {} progress {} {}", static_cast<u32>(stage), value,
-                      total);
-        });
+extern "C" void LaunchEmcFrontend(int argc, char** argv) {
+    std::cout << "[Azahar] Welcome to Azahar WASM" << std::endl;
 
-    std::cout << "Loaded Disk Resources. Launching!" << std::endl;
-
-    while (emu_window->IsOpen()) {
-        const auto result = system.RunLoop();
-
-        switch (result) {
-        case Core::System::ResultStatus::ShutdownRequested:
-            emu_window->RequestClose();
-            break;
-        case Core::System::ResultStatus::Success:
-            break;
-        default:
-            LOG_ERROR(Frontend, "Error in main run loop: {}", result, system.GetStatusDetails());
-            break;
-        }
+    if (!InitEmulator()) {
+        std::cerr << "[Azahar] Initialization failed." << std::endl;
+        return;
     }
 
-    std::cout << "Ending..." << std::endl;
+#ifdef __EMSCRIPTEN__
+    // Use emscripten's main loop instead of std::thread + while loop.
+    // This is the browser-compatible way to run a persistent loop.
+    emscripten_set_main_loop(MainLoopIter, 0, 1);
+#else
+    // Native fallback — use a regular while loop
+    while (g_emulator_running && g_emu_window && g_emu_window->IsOpen()) {
+        MainLoopIter();
+    }
+#endif
 
-    emu_window->RequestClose();
-    main_render_thread.join();
+    // Cleanup (only reached in native mode)
+    if (g_system) {
+        Network::Shutdown();
+        InputCommon::Shutdown();
+        g_system->Shutdown();
+    }
 
-    Network::Shutdown();
-    InputCommon::Shutdown();
-
-    system.Shutdown();
-
-    detached_tasks.WaitForAllTasks();
-
-    std::cout << "Bye Bye!" << std::endl;
-
+    std::cout << "[Azahar] Bye!" << std::endl;
 }

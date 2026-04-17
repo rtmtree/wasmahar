@@ -54,6 +54,15 @@ endif()
 
 if (ENABLE_EMC)
     target_link_libraries(citra_meta PRIVATE citra_emc)
+    # Export C functions and runtime methods for JavaScript interop
+    if (EMC_EXPORTED_FUNCTIONS)
+        target_link_options(citra_meta PRIVATE
+            "SHELL:-sEXPORTED_FUNCTIONS=[${EMC_EXPORTED_FUNCTIONS}]")
+    endif()
+    if (EMC_EXPORTED_RUNTIME_METHODS)
+        target_link_options(citra_meta PRIVATE
+            "SHELL:-sEXPORTED_RUNTIME_METHODS=[${EMC_EXPORTED_RUNTIME_METHODS}]")
+    endif()
 endif()
 
 if (ENABLE_ROOM)

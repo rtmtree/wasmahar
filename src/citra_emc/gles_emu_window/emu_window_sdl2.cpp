@@ -8,6 +8,9 @@
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
 #include "citra_emc/gles_emu_window/emu_window_sdl2.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include "common/logging/log.h"
 #include "common/scm_rev.h"
 #include "core/core.h"
@@ -84,7 +87,19 @@ void EmuWindow_SDL2::RequestClose() {
 
 void EmuWindow_SDL2::OnResize() {
     int width, height;
+#ifdef __EMSCRIPTEN__
+    // SDL's window size reflects its internal default (800x600), not the
+    // actual HTML canvas sizing controlled by React. Read the real canvas
+    // dimensions from Module.canvas so the framebuffer layout matches the
+    // WebGL drawing buffer.
+    width = EM_ASM_INT({ return Module.canvas ? Module.canvas.width : 0; });
+    height = EM_ASM_INT({ return Module.canvas ? Module.canvas.height : 0; });
+    if (width <= 0 || height <= 0) {
+        SDL_GL_GetDrawableSize(render_window, &width, &height);
+    }
+#else
     SDL_GL_GetDrawableSize(render_window, &width, &height);
+#endif
     UpdateCurrentFramebufferLayout(width, height);
 }
 
@@ -113,7 +128,12 @@ EmuWindow_SDL2::EmuWindow_SDL2(Core::System& system_, bool is_secondary)
     : EmuWindow(is_secondary), system(system_) {}
 
 EmuWindow_SDL2::~EmuWindow_SDL2() {
+#ifdef __EMSCRIPTEN__
+    // Skip SDL_Quit in Emscripten — it can abort() during cleanup.
+    // The browser handles all resource cleanup on page unload.
+#else
     SDL_Quit();
+#endif
 }
 
 void EmuWindow_SDL2::InitializeSDL2() {
