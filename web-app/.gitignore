@@ -25,5 +25,5 @@ dist-ssr
 
 
 public/*.3ds
-public/azahar.js
-public/azahar.wasm
+public/wasm/azahar.js
+public/wasm/azahar.wasm
