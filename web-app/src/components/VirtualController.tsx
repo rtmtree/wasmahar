@@ -1,63 +1,72 @@
 import { useCallback, useEffect, useRef } from 'react';
 
-// 3DS button → SDL scancode mapping (matches the defaults in src/citra_sdl/config.cpp).
-// We send the event's `code` (for SDL's DOM event handler) and a matching `keyCode`
-// for older paths. SDL2's Emscripten port listens to key events on `document`.
+// 3DS button → SDL scancode mapping. Must match the defaults seeded in
+// src/citra_emc/citra_emc.cpp (InitDefaultInputProfile) and in the sibling
+// src/citra_sdl/config.cpp. Values come from SDL_scancode.h.
+const SDL = {
+  A: 4,  B: 5,  D: 7,  F: 9,  G: 10, H: 11, I: 12, J: 13, K: 14, L: 15,
+  M: 16, N: 17, O: 18, P: 19, Q: 20, S: 22, T: 23, W: 26, X: 27, Y: 28,
+  Z: 29,
+  ONE: 30, TWO: 31,
+  RIGHT: 79, LEFT: 80, DOWN: 81, UP: 82,
+} as const;
+
 type ButtonSpec = {
   label: string;
-  code: string;
-  keyCode: number;
-  key: string;
+  scancode: number;
 };
 
-const B = (label: string, code: string, keyCode: number, key: string): ButtonSpec => ({
-  label, code, keyCode, key,
-});
+const B = (label: string, scancode: number): ButtonSpec => ({ label, scancode });
 
 const FACE = {
-  A: B('A', 'KeyA', 65, 'a'),
-  B: B('B', 'KeyS', 83, 's'),
-  X: B('X', 'KeyZ', 90, 'z'),
-  Y: B('Y', 'KeyX', 88, 'x'),
+  A: B('A', SDL.A),
+  B: B('B', SDL.S),
+  X: B('X', SDL.Z),
+  Y: B('Y', SDL.X),
 };
 
 const DPAD = {
-  UP: B('▲', 'KeyT', 84, 't'),
-  DOWN: B('▼', 'KeyG', 71, 'g'),
-  LEFT: B('◀', 'KeyF', 70, 'f'),
-  RIGHT: B('▶', 'KeyH', 72, 'h'),
+  UP: B('▲', SDL.T),
+  DOWN: B('▼', SDL.G),
+  LEFT: B('◀', SDL.F),
+  RIGHT: B('▶', SDL.H),
 };
 
-// Circle Pad (analog) — defaults map to arrow keys in citra_sdl/config.cpp
+// Circle Pad (analog). Defaults map to arrow keys, matching
+// InitDefaultInputProfile's default_analogs[0].
 const CPAD = {
-  UP: B('↑', 'ArrowUp', 38, 'ArrowUp'),
-  DOWN: B('↓', 'ArrowDown', 40, 'ArrowDown'),
-  LEFT: B('←', 'ArrowLeft', 37, 'ArrowLeft'),
-  RIGHT: B('→', 'ArrowRight', 39, 'ArrowRight'),
+  UP: B('↑', SDL.UP),
+  DOWN: B('↓', SDL.DOWN),
+  LEFT: B('←', SDL.LEFT),
+  RIGHT: B('→', SDL.RIGHT),
 };
 
 const SHOULDER = {
-  L: B('L', 'KeyQ', 81, 'q'),
-  R: B('R', 'KeyW', 87, 'w'),
+  L: B('L', SDL.Q),
+  R: B('R', SDL.W),
 };
 
 const SYSTEM = {
-  SELECT: B('SELECT', 'KeyN', 78, 'n'),
-  START: B('START', 'KeyM', 77, 'm'),
+  SELECT: B('SELECT', SDL.N),
+  START: B('START', SDL.M),
 };
 
-function dispatchKey(type: 'keydown' | 'keyup', btn: ButtonSpec) {
-  const ev = new KeyboardEvent(type, {
-    key: btn.key,
-    code: btn.code,
-    keyCode: btn.keyCode,
-    which: btn.keyCode,
-    bubbles: true,
-    cancelable: true,
-    repeat: false,
-  });
-  // SDL2's Emscripten port registers its handler on `document`.
-  document.dispatchEvent(ev);
+type AzaharModule = {
+  ccall: (name: string, returnType: string | null, argTypes: string[], args: unknown[]) => unknown;
+};
+
+function getModule(): AzaharModule | null {
+  return (window as unknown as { __azahar?: AzaharModule }).__azahar ?? null;
+}
+
+function sendKey(type: 'down' | 'up', scancode: number) {
+  const mod = getModule();
+  if (!mod) return;
+  try {
+    mod.ccall(type === 'down' ? 'EmcKeyDown' : 'EmcKeyUp', null, ['number'], [scancode]);
+  } catch {
+    // ignore — likely called before ccall is ready
+  }
 }
 
 interface PadButtonProps {
@@ -71,19 +80,21 @@ function PadButton({ btn, className, children }: PadButtonProps) {
 
   const press = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     if (!pressedRef.current) {
       pressedRef.current = true;
-      dispatchKey('keydown', btn);
+      sendKey('down', btn.scancode);
     }
   }, [btn]);
 
   const release = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     try { (e.currentTarget as Element).releasePointerCapture?.(e.pointerId); } catch { /* empty */ }
     if (pressedRef.current) {
       pressedRef.current = false;
-      dispatchKey('keyup', btn);
+      sendKey('up', btn.scancode);
     }
   }, [btn]);
 
@@ -91,7 +102,7 @@ function PadButton({ btn, className, children }: PadButtonProps) {
   useEffect(() => () => {
     if (pressedRef.current) {
       pressedRef.current = false;
-      dispatchKey('keyup', btn);
+      sendKey('up', btn.scancode);
     }
   }, [btn]);
 

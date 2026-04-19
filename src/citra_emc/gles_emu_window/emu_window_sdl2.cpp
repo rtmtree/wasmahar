@@ -144,7 +144,11 @@ void EmuWindow_SDL2::InitializeSDL2() {
     }
 
     InputCommon::Init();
+#ifndef __EMSCRIPTEN__
+    // Network stack (ENet) isn't plumbed through WebSockets in the web build;
+    // initializing it just burns a few ms and sets up sockets we never use.
     Network::Init();
+#endif
 
     SDL_SetMainReady();
 }

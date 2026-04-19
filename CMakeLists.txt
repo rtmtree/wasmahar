@@ -209,13 +209,26 @@ endif()
 
 # =======================================================================
 if (EMSCRIPTEN)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g --use-port=sdl2 -pthread -fexperimental-library -fwasm-exceptions")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g --use-port=sdl2 -pthread -fexperimental-library -fwasm-exceptions")
+    # Release builds: no DWARF (lets Binaryen run full -O3 passes), LTO on,
+    # and a fixed 1 GiB heap so emscripten doesn't wrap every HEAP access with
+    # growMemViews() — that wrap costs ~30-50 % on pthread+growable builds.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --use-port=sdl2 -pthread -fexperimental-library -fwasm-exceptions -msimd128 -mbulk-memory -mnontrapping-fptoint")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --use-port=sdl2 -pthread -fexperimental-library -fwasm-exceptions -msimd128 -mbulk-memory -mnontrapping-fptoint")
     # experimental-library is for jthread
-    add_link_options(-lopenal -sMAX_WEBGL_VERSION=2 --use-port=sdl2) # OpenAL, OpenGL, SDL2 ports
-    add_link_options(-pthread -sPTHREAD_POOL_SIZE=15 -fexperimental-library -fwasm-exceptions -sTOTAL_MEMORY=200MB -sALLOW_MEMORY_GROWTH=1 -sUSE_WEBGL2=1 -sEXPORT_NAME=createAzaharModule -sMODULARIZE=1 -sINVOKE_RUN=0) # stuff for threads, debugging, and others
+    add_link_options(-lopenal -lidbfs.js -sMAX_WEBGL_VERSION=2 --use-port=sdl2) # OpenAL, OpenGL, SDL2, IDBFS ports
+    # --closure 1 is intentionally off: it renames FS.syncfs / FS.mount /
+    # FS.filesystems (used by the IDBFS save-persistence path) which are not
+    # in EXPORTED_RUNTIME_METHODS and can't be trivially whitelisted.
+    add_link_options(
+        -O3 -flto
+        -pthread -sPTHREAD_POOL_SIZE=15
+        -fexperimental-library -fwasm-exceptions
+        -sINITIAL_MEMORY=1024MB -sALLOW_MEMORY_GROWTH=0
+        -sUSE_WEBGL2=1
+        -sFORCE_FILESYSTEM=1
+        -sEXPORT_NAME=createAzaharModule -sMODULARIZE=1 -sINVOKE_RUN=0)
     # Export C functions callable from JavaScript and expose runtime methods
-    set(EMC_EXPORTED_FUNCTIONS "_main,_SetEmcRomPath,_EmcTouchDown,_EmcTouchMove,_EmcTouchUp" CACHE STRING "" FORCE)
+    set(EMC_EXPORTED_FUNCTIONS "_main,_SetEmcRomPath,_EmcTouchDown,_EmcTouchMove,_EmcTouchUp,_EmcKeyDown,_EmcKeyUp" CACHE STRING "" FORCE)
     set(EMC_EXPORTED_RUNTIME_METHODS "callMain,cwrap,ccall,FS" CACHE STRING "" FORCE)
     # ROM files are loaded at runtime from the web UI, not preloaded at build time.
 endif()

@@ -2,6 +2,16 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 import type { UseEmulatorReturn, EmulatorStatus } from './types';
 
 // Emscripten module interface
+interface EmscriptenFS {
+  writeFile: (path: string, data: Uint8Array) => void;
+  mkdir: (path: string) => void;
+  mkdirTree?: (path: string) => void;
+  readFile: (path: string) => Uint8Array;
+  mount: (fs: unknown, opts: object, mountpoint: string) => void;
+  syncfs: (populate: boolean, cb: (err: Error | null) => void) => void;
+  filesystems: { IDBFS: unknown; MEMFS: unknown };
+}
+
 interface EmscriptenModule {
   canvas: HTMLCanvasElement;
   callMain: (args?: string[]) => void;
@@ -12,11 +22,7 @@ interface EmscriptenModule {
   // Emscripten runtime methods (exported via EXPORTED_RUNTIME_METHODS)
   cwrap: (name: string, returnType: string, argTypes: string[]) => (...args: unknown[]) => unknown;
   ccall: (name: string, returnType: string, argTypes: string[], args: unknown[]) => unknown;
-  FS: {
-    writeFile: (path: string, data: Uint8Array) => void;
-    mkdir: (path: string) => void;
-    readFile: (path: string) => Uint8Array;
-  };
+  FS: EmscriptenFS;
 }
 
 type EmscriptenFactory = (config: Partial<EmscriptenModule>) => Promise<EmscriptenModule>;
@@ -24,6 +30,70 @@ type EmscriptenFactory = (config: Partial<EmscriptenModule>) => Promise<Emscript
 const WASM_BASE = '/wasm';
 const ROM_PATH = '/rom.3ds';
 const DEFAULT_ROM_URL = '/ab.3ds';
+
+// Module-level guard so React 18 StrictMode's dev-time double effect invocation
+// (and any hot-reload remount) can't spawn a second Emscripten instance. Each
+// factory() call starts its own emscripten_set_main_loop, and two loops racing
+// to SwapWindow on the same canvas produces visible frame flashing.
+let g_wasm_load_started = false;
+
+// Where the 3DS core writes save data / NAND state. Matches the prefix used by
+// FileUtil::GetUserPath(UserDir) on Emscripten (FileUtil uses the current
+// working directory, which Emscripten sets to /home/web_user/). Anything under
+// this path is persisted across reloads via IndexedDB.
+const PERSIST_PATH = '/home/web_user/.local/share/azahar-emu';
+// Flush dirty FS writes to IDB at this cadence while the emulator is running,
+// and once more on beforeunload.
+const SYNC_INTERVAL_MS = 10_000;
+
+async function mountPersistentFS(module: EmscriptenModule): Promise<void> {
+  const { FS } = module;
+  // Ensure the mountpoint exists in MEMFS before mounting IDBFS on top.
+  // FS.mkdirTree recursively creates parents.
+  try { (FS.mkdirTree ?? FS.mkdir)(PERSIST_PATH); } catch { /* already exists */ }
+  try {
+    FS.mount(FS.filesystems.IDBFS, {}, PERSIST_PATH);
+  } catch (e) {
+    console.warn('[Azahar] IDBFS mount failed; saves will not persist:', e);
+    return;
+  }
+  // populate=true pulls any previously-persisted files from IndexedDB into
+  // the in-memory FS. Must finish before the emulator touches those files.
+  await new Promise<void>((resolve, reject) => {
+    FS.syncfs(true, (err) => (err ? reject(err) : resolve()));
+  });
+  console.log('[Azahar] IDBFS mounted at', PERSIST_PATH);
+}
+
+function installPersistFlush(module: EmscriptenModule): void {
+  const { FS } = module;
+  let pending = false;
+  const flush = () => {
+    if (pending) return;
+    pending = true;
+    try {
+      FS.syncfs(false, (err) => {
+        pending = false;
+        if (err) console.warn('[Azahar] IDBFS flush error:', err);
+      });
+    } catch (e) {
+      pending = false;
+      console.warn('[Azahar] IDBFS flush threw:', e);
+    }
+  };
+  // Periodic flush so a crash/tab-close mid-session only loses at most
+  // SYNC_INTERVAL_MS worth of game state.
+  setInterval(flush, SYNC_INTERVAL_MS);
+  // Best-effort synchronous flush on tab unload. `beforeunload` is more
+  // reliable than `unload`, and `pagehide` catches the mobile/BFCache case.
+  window.addEventListener('beforeunload', flush);
+  window.addEventListener('pagehide', flush);
+  // Also flush when the tab loses visibility — the OS may kill the tab
+  // before unload fires, especially on mobile.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush();
+  });
+}
 
 export function useEmulator(): UseEmulatorReturn {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -87,6 +157,15 @@ export function useEmulator(): UseEmulatorReturn {
   }, []);
 
   const loadRom = useCallback(async (file: File) => {
+    // Guard against double-initialization (StrictMode dev double-effect, HMR
+    // remount). Set synchronously before any await so the second caller
+    // short-circuits immediately. Without this, both callers reach factory()
+    // and spawn parallel emscripten main loops that strobe the canvas.
+    if (g_wasm_load_started) {
+      console.log('[Azahar] loadRom: already initializing, skipping duplicate call');
+      return;
+    }
+    g_wasm_load_started = true;
     try {
       setStatus('loading');
       setErrorMessage(null);
@@ -132,6 +211,17 @@ export function useEmulator(): UseEmulatorReturn {
       });
 
       moduleRef.current = module;
+      // Expose the module globally for debugging / manual save-state pokes
+      // from the browser console. Not security-sensitive (no powers beyond
+      // what any page script has), and it makes the Azahar FS inspectable.
+      (window as unknown as { __azahar?: EmscriptenModule }).__azahar = module;
+
+      // Mount IndexedDB-backed persistent filesystem for 3DS save data BEFORE
+      // the emulator boots, then pull any previously-persisted files into
+      // the in-memory FS tree. The emulator will write game saves / NAND
+      // state under PERSIST_PATH which the periodic flush below pushes back
+      // to IndexedDB. Without this, every page reload wipes player progress.
+      await mountPersistentFS(module);
 
       // Write ROM to the Emscripten virtual filesystem.
       // The factory promise resolves after the runtime is initialized
@@ -160,7 +250,11 @@ export function useEmulator(): UseEmulatorReturn {
       module.callMain([]);
       setStatus('running');
       startFpsCounter();
+      installPersistFlush(module);
     } catch (err) {
+      // Reset the guard so the user can retry after an error
+      // (e.g. picking a different ROM after a failed load).
+      g_wasm_load_started = false;
       const msg = err instanceof Error ? err.message : 'Unknown error loading ROM';
       setErrorMessage(msg);
       setStatus('error');

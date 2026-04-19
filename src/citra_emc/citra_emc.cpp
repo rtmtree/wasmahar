@@ -4,6 +4,9 @@
 #include <atomic>
 #include <stdexcept>
 
+#include <array>
+#include <SDL2/SDL_scancode.h>
+
 #include "common/detached_tasks.h"
 #include "common/settings.h"
 #include "common/file_util.h"
@@ -11,6 +14,7 @@
 #include "core/core.h"
 #include "core/frontend/applets/default_applets.h"
 #include "core/frontend/framebuffer_layout.h"
+#include "input_common/keyboard.h"
 #include "input_common/main.h"
 #include "network/network.h"
 #include "video_core/gpu.h"
@@ -69,6 +73,54 @@ extern "C" void EmcTouchUp() {
 }
 
 // ---------------------------------------------------------------------------
+// Direct keyboard input from JS. Mirrors the EmcTouch* bypass so the on-screen
+// virtual controller reaches the keyboard input device directly, without going
+// through a synthetic DOM KeyboardEvent and SDL2's Emscripten event routing.
+// Scancodes passed in are SDL2 scancodes (see SDL_scancode.h) and must match
+// whatever the default input profile was seeded with below.
+// ---------------------------------------------------------------------------
+extern "C" void EmcKeyDown(int scancode) {
+    InputCommon::GetKeyboard()->PressKey(scancode);
+}
+
+extern "C" void EmcKeyUp(int scancode) {
+    InputCommon::GetKeyboard()->ReleaseKey(scancode);
+}
+
+// ---------------------------------------------------------------------------
+// Seed a default keyboard-based input profile. The web build has no INI config,
+// so Settings::values.current_input_profile arrives with empty button strings
+// and the core never wires up any input devices. Mirror the defaults used by
+// citra_sdl/config.cpp so A/B/X/Y, D-pad, shoulders, circle pad, SELECT/START
+// all map to their canonical SDL scancodes.
+// ---------------------------------------------------------------------------
+static void InitDefaultInputProfile() {
+    static const std::array<int, Settings::NativeButton::NumButtons> default_buttons = {
+        SDL_SCANCODE_A, SDL_SCANCODE_S, SDL_SCANCODE_Z, SDL_SCANCODE_X,
+        SDL_SCANCODE_T, SDL_SCANCODE_G, SDL_SCANCODE_F, SDL_SCANCODE_H,
+        SDL_SCANCODE_Q, SDL_SCANCODE_W, SDL_SCANCODE_M, SDL_SCANCODE_N,
+        SDL_SCANCODE_O, SDL_SCANCODE_P, SDL_SCANCODE_1, SDL_SCANCODE_2,
+        SDL_SCANCODE_B,
+    };
+    static const std::array<std::array<int, 5>, Settings::NativeAnalog::NumAnalogs>
+        default_analogs{{
+            {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
+             SDL_SCANCODE_D},
+            {SDL_SCANCODE_I, SDL_SCANCODE_K, SDL_SCANCODE_J, SDL_SCANCODE_L, SDL_SCANCODE_D},
+        }};
+
+    for (int i = 0; i < Settings::NativeButton::NumButtons; ++i) {
+        Settings::values.current_input_profile.buttons[i] =
+            InputCommon::GenerateKeyboardParam(default_buttons[i]);
+    }
+    for (int i = 0; i < Settings::NativeAnalog::NumAnalogs; ++i) {
+        const auto& a = default_analogs[i];
+        Settings::values.current_input_profile.analogs[i] =
+            InputCommon::GenerateAnalogParamFromKeys(a[0], a[1], a[2], a[3], a[4], 0.5f);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error-safe initialization — returns false instead of calling exit()
 // ---------------------------------------------------------------------------
 static bool InitEmulator() {
@@ -110,9 +162,20 @@ static bool InitEmulator() {
         EmuWindow_SDL2::InitializeSDL2();
 
         std::cout << "[Azahar] SDL Initialized" << std::endl;
+
+        // Seed default keyboard button/analog bindings before the core wires up
+        // its input devices during system.Load(). Without this, every key press
+        // (real or synthetic) has no effect.
+        InitDefaultInputProfile();
+
         std::cout << "[Azahar] Creating emu window..." << std::endl;
 
-        auto emu_window_ptr = std::make_unique<EmuWindow_SDL2_GL>(system, true, false);
+        // Don't pass fullscreen=true here: on Emscripten the
+        // SDL_SetWindowFullscreen request is deferred until the next user
+        // gesture, so the first click/keypress would unexpectedly enter
+        // fullscreen. The React app's toolbar button handles fullscreen
+        // on explicit user request.
+        auto emu_window_ptr = std::make_unique<EmuWindow_SDL2_GL>(system, false, false);
         g_emu_window = emu_window_ptr.get();
 
         std::cout << "[Azahar] Created window" << std::endl;
@@ -200,7 +263,7 @@ static void MainLoopIter() {
     // (out of a 16.6 ms frame budget) stacking back-to-back slices — this
     // lifts the game to ~90 % of real-time speed when CPU-bound, without
     // starving the browser event loop.
-    constexpr double kBudgetMs = 12.0;
+    constexpr double kBudgetMs = 14.0;
     const double start_ms = emscripten_get_now();
     Core::System::ResultStatus result = Core::System::ResultStatus::Success;
     do {

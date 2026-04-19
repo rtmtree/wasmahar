@@ -373,6 +373,22 @@ StereoFrame16 DspHle::Impl::GenerateCurrentFrame() {
 
     std::array<QuadFrame32, 3> intermediate_mixes = {};
 
+#ifdef __EMSCRIPTEN__
+    // Fast-path for the WASM build: audio output isn't plumbed through and the
+    // mixer loops (24 sources × 3 intermediate mixes + final mixer) are ~8-12 %
+    // of each frame's CPU budget. Games still need `source_statuses.status[i]`
+    // updated so they don't deadlock polling audio state, so we keep the cheap
+    // per-source Tick() but drop the expensive MixInto / mixers.Tick work.
+    for (std::size_t i = 0; i < HLE::num_sources; i++) {
+        write.source_statuses.status[i] =
+            sources[i].Tick(read.source_configurations.config[i], read.adpcm_coefficients.coeff[i]);
+    }
+    // Still advance mixer state (cheap) so dsp_status stays sane, but feed zero
+    // intermediates — games check the status, not the mixed samples.
+    write.dsp_status = mixers.Tick(read.dsp_configuration, read.intermediate_mix_samples,
+                                   write.intermediate_mix_samples, intermediate_mixes);
+    return {};
+#else
     // Generate intermediate mixes
     for (std::size_t i = 0; i < HLE::num_sources; i++) {
         write.source_statuses.status[i] =
@@ -396,6 +412,7 @@ StereoFrame16 DspHle::Impl::GenerateCurrentFrame() {
     }
 
     return output_frame;
+#endif
 }
 
 bool DspHle::Impl::Tick() {
